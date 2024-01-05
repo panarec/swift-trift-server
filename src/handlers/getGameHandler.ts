@@ -7,13 +7,15 @@ import { getFinnishMarkerNode } from '../processors/getFinnishMarkerNode'
 import { Request } from 'express'
 import { getDirectionsFromNode } from '../processors/getDirectionsFromNode'
 
-export const getGameHandler = async (request: Request) => {
+export const getGameHandler = async (request: Request | null) => {
     let startMarkerPosition: LngLat
     let startMarkerNode: NodeElement | null
 
     let finnishMarkerPosition: LngLat
     let finnishMarkerNode: NodeElement
-    const reqBody = request.body
+    const reqBody = request?.body
+
+    let currentLevel = reqBody?.currentLevel || 1
 
     const randomCityId = await getRandomCity()
     const randomCityMetadata = await getCityById(randomCityId)
@@ -33,7 +35,7 @@ export const getGameHandler = async (request: Request) => {
         finnishMarkerNode = await getFinnishMarkerNode(
             startMarkerPosition,
             maxRadius,
-            reqBody.currentLevel
+            currentLevel
         )
         finnishMarkerPosition = new LngLat(
             finnishMarkerNode.lon,

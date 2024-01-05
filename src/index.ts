@@ -6,6 +6,7 @@ import { finnishGameHandler } from './handlers/finnishGameHandler'
 import { createServer } from 'http'
 import { Server } from 'socket.io'
 import { origin } from 'bun'
+import { get } from 'lodash'
 
 const corsOptions = {
     origin: 'http://localhost:5173',
@@ -42,15 +43,17 @@ const io = new Server(httpServer, {
     cors: { origin: ['http://localhost:5173'] },
 })
 
+let rooms: RoomItem[] = []
+
 type RoomItem = {
     lobbyNumber: string
     players: {
         playerName: string
         socketId: string
+        ready: boolean
+        score: number
     }[]
 }
-
-let rooms: RoomItem[] = []
 
 io.on('connection', (socket) => {
     console.log(socket.id)
@@ -58,18 +61,65 @@ io.on('connection', (socket) => {
     socket.on('join-lobby', async (lobbyNumber, playerName, callback) => {
         await socket.join(lobbyNumber)
         const roomPlayers = io.sockets.adapter.rooms.get(lobbyNumber)
-
+        console.log(roomPlayers)
         rooms = addPlayerToLobby(lobbyNumber, playerName, socket.id)
 
         const socketRoom = rooms.find(
             (room) => room.lobbyNumber === lobbyNumber
         )
-
-        socket.to(lobbyNumber).emit('player-joined', socketRoom)
+        console.log(socketRoom)
+        socket.to(lobbyNumber).emit('lobby-change', socketRoom)
         callback(socketRoom)
     })
     socket.on('leave-lobby', async (lobbyNumber, callback) => {
         await socket.leave(lobbyNumber)
+
+        rooms = removePlayerFromLobby(lobbyNumber, socket.id)
+
+        const socketRoom = rooms.find(
+            (room) => room.lobbyNumber === lobbyNumber
+        )
+        callback()
+        socket.to(lobbyNumber).emit('lobby-change', socketRoom)
+    })
+    socket.on('game-ready', async (playerStatus, callback) => {
+        const playersRoom = rooms.find((room) => {
+            return room.players.find((player) => player.socketId === socket.id)
+        })
+
+        if (playersRoom) {
+            const socketRoom = rooms.find(
+                (room) => room.lobbyNumber === playersRoom.lobbyNumber
+            )
+
+            rooms = changePlayerState(playerStatus, socket.id)
+
+            const room = rooms.find(
+                (room) => room.lobbyNumber === playersRoom.lobbyNumber
+            )
+
+            callback(room as RoomItem)
+            if (room?.players.every((player) => player.ready)) {
+                const gameParams = await getGameHandler(null)
+                socket
+                    .to(playersRoom.lobbyNumber)
+                    .emit('lobby-change', room as RoomItem)
+                socket
+                    .to(playersRoom.lobbyNumber)
+                    .emit('game-start', gameParams)
+                socket.emit('game-start', gameParams)
+            } else {
+                socket
+                    .to(playersRoom.lobbyNumber)
+                    .emit('lobby-change', room as RoomItem)
+            }
+        } else {
+            callback()
+        }
+    })
+    socket.on('game-unready', async (lobbyNumber, callback) => {
+        await socket.leave(lobbyNumber)
+        console.log(lobbyNumber)
         const roomPlayers = io.sockets.adapter.rooms.get(lobbyNumber)
 
         rooms = removePlayerFromLobby(lobbyNumber, socket.id)
@@ -88,27 +138,27 @@ const addPlayerToLobby = (
     lobbyNumber: string,
     playerName: string,
     socketId: string
-) => {
+): RoomItem[] => {
     const existingRoom = rooms.find((room) => room.lobbyNumber === lobbyNumber)
     if (existingRoom) {
         return rooms.map((room) => {
             if (room.lobbyNumber === lobbyNumber) {
                 return {
                     lobbyNumber,
-                    players: [...room.players, { playerName, socketId }],
+                    players: [
+                        ...room.players,
+                        { playerName, socketId, ready: false, score: 0 },
+                    ],
                 }
             }
-            return {
-                lobbyNumber,
-                players: [{ playerName, socketId }],
-            }
+            return room
         })
     }
     return [
         ...rooms,
         {
             lobbyNumber,
-            players: [{ playerName, socketId }],
+            players: [{ playerName, socketId, ready: false, score: 0 }],
         },
     ]
 }
@@ -124,5 +174,19 @@ const removePlayerFromLobby = (lobbyNumber: string, socketId: string) => {
             }
         }
         return room
+    })
+}
+
+const changePlayerState = (ready: boolean, socketId: string) => {
+    return rooms.map((room) => {
+        return {
+            ...room,
+            players: room.players.map((player) => {
+                if (player.socketId === socketId) {
+                    return { ...player, ready }
+                }
+                return player
+            }),
+        }
     })
 }
