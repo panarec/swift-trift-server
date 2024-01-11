@@ -5,8 +5,9 @@ import { moveHandler } from './handlers/moveHandler'
 import { finnishGameHandler } from './handlers/finnishGameHandler'
 import { createServer } from 'http'
 import { Server } from 'socket.io'
-import { origin } from 'bun'
-import { get } from 'lodash'
+import { GameParams } from './handlers/types'
+import { v4 } from 'uuid'
+import { getRouteCoordinates } from './services/mapbox/mapmatching/getRouteCoordinates'
 
 const corsOptions = {
     origin: 'http://localhost:5173',
@@ -43,128 +44,282 @@ const io = new Server(httpServer, {
     cors: { origin: ['http://localhost:5173'] },
 })
 
-let rooms: RoomItem[] = []
+let lobbies: LobbyItem[] = []
 
-type RoomItem = {
-    lobbyNumber: string
-    players: {
-        playerName: string
-        socketId: string
-        ready: boolean
-        score: number
-    }[]
+type PlayerItem = {
+    playerName: string
+    socketId: string
+    ready: boolean
+    score: number
+    color: string
+    finished: boolean
+    routeCoordinates: number[][]
+    distance: number
 }
+
+type LobbyItem = {
+    lobbyNumber: string
+    players: PlayerItem[]
+    game: {
+        gameParams: GameParams | null
+        gameOptions: GameOptions
+    }
+}
+type GameOptions = {
+    timeLimit: number
+    levelsPerGame: number
+}
+
+const availableColors = ['FF9F1C', '3772FF', 'DF2935', '43E726', 'CD38FF']
 
 io.on('connection', (socket) => {
     console.log(socket.id)
     socket.broadcast.emit('random')
-    socket.on('join-lobby', async (lobbyNumber, playerName, callback) => {
-        await socket.join(lobbyNumber)
-        const roomPlayers = io.sockets.adapter.rooms.get(lobbyNumber)
-        console.log(roomPlayers)
-        rooms = addPlayerToLobby(lobbyNumber, playerName, socket.id)
+    socket.on(
+        'join-lobby',
+        async (lobbyNumber: string, playerName: string, callback) => {
+            await socket.join(lobbyNumber)
+            const roomPlayers = io.sockets.adapter.rooms.get(lobbyNumber)
+            lobbies = addPlayerToLobby(lobbyNumber, playerName, socket.id)
 
-        const socketRoom = rooms.find(
-            (room) => room.lobbyNumber === lobbyNumber
-        )
-        console.log(socketRoom)
-        socket.to(lobbyNumber).emit('lobby-change', socketRoom)
-        callback(socketRoom)
-    })
-    socket.on('leave-lobby', async (lobbyNumber, callback) => {
+            const socketRoom = lobbies.find(
+                (lobby) => lobby.lobbyNumber === lobbyNumber
+            )
+            socket.to(lobbyNumber).emit('lobby-change', socketRoom)
+            callback(socketRoom)
+        }
+    )
+    socket.on('leave-lobby', async (callback) => {
+        const lobbyNumber = lobbies.find((lobby) => {
+            return lobby.players.find((player) => player.socketId === socket.id)
+        })?.lobbyNumber
+
+        if (!lobbyNumber) return
+        
         await socket.leave(lobbyNumber)
 
-        rooms = removePlayerFromLobby(lobbyNumber, socket.id)
+        lobbies = removePlayerFromLobby(lobbyNumber, socket.id)
 
-        const socketRoom = rooms.find(
-            (room) => room.lobbyNumber === lobbyNumber
+        const socketLobby = lobbies.find(
+            (lobby) => lobby.lobbyNumber === lobbyNumber
         )
         callback()
-        socket.to(lobbyNumber).emit('lobby-change', socketRoom)
+        socket.to(lobbyNumber).emit('lobby-change', socketLobby)
     })
-    socket.on('game-ready', async (playerStatus, callback) => {
-        const playersRoom = rooms.find((room) => {
-            return room.players.find((player) => player.socketId === socket.id)
+    socket.on(
+        'change-lobby-options',
+        async (options: GameOptions, callback) => {
+            const playerLobby = lobbies.find((lobby) => {
+                return lobby.players.find(
+                    (player) => player.socketId === socket.id
+                )
+            })
+            if (playerLobby) {
+                lobbies = lobbies.map((lobby) => {
+                    if (lobby.lobbyNumber === playerLobby.lobbyNumber) {
+                        return {
+                            ...lobby,
+                            options,
+                        }
+                    }
+                    return lobby
+                })
+                socket.emit('lobby-change', playerLobby as LobbyItem)
+                socket
+                    .to(playerLobby.lobbyNumber)
+                    .emit('lobby-change', playerLobby as LobbyItem)
+            }
+        }
+    )
+    socket.on(
+        'game-ready',
+        async (playerStatus: boolean, options: GameOptions, callback) => {
+            const playerLobby = lobbies.find((lobby) => {
+                return lobby.players.find(
+                    (player) => player.socketId === socket.id
+                )
+            })
+
+            if (playerLobby) {
+                const newLobby = changePlayerState(
+                    playerStatus,
+                    socket.id,
+                    playerLobby
+                )
+
+                lobbies = lobbies.map((lobby) => {
+                    if (lobby.lobbyNumber === playerLobby.lobbyNumber) {
+                        return newLobby
+                    }
+                    return lobby
+                })
+
+                socket.emit('lobby-change', newLobby as LobbyItem)
+                socket
+                    .to(playerLobby.lobbyNumber)
+                    .emit('lobby-change', newLobby as LobbyItem)
+                if (newLobby?.players.every((player) => player.ready)) {
+                    socket.to(playerLobby.lobbyNumber).emit('all-ready')
+                    socket.emit('all-ready')
+                    const lobbyWithGame = await generateDuelGame(playerLobby)
+                    lobbies = lobbies.map((lobby) => {
+                        if (lobby.lobbyNumber === playerLobby.lobbyNumber) {
+                            return lobbyWithGame
+                        }
+                        return lobby
+                    })
+
+                    socket
+                        .to(playerLobby.lobbyNumber)
+                        .emit('game-start', lobbyWithGame.game.gameParams)
+                    socket.emit('game-start', lobbyWithGame.game.gameParams)
+                }
+            }
+        }
+    )
+
+    socket.on('finnish-level', async (routeCoordinates) => {
+        const playerLobby = lobbies.find((lobby) => {
+            return lobby.players.find((player) => player.socketId === socket.id)
         })
 
-        if (playersRoom) {
-            const socketRoom = rooms.find(
-                (room) => room.lobbyNumber === playersRoom.lobbyNumber
+        if (playerLobby) {
+            const player = playerLobby.players.find(
+                (player) => player.socketId === socket.id
             )
+            if (player) {
+                player.finished = true
+                const playerMatchObject =
+                    await getRouteCoordinates(routeCoordinates)
+                player.distance = playerMatchObject.distance
+                player.routeCoordinates = playerMatchObject.geometry.coordinates
 
-            rooms = changePlayerState(playerStatus, socket.id)
+                const players = playerLobby.players
+                const finnishedPlayers = players.filter(
+                    (player) => player.finished
+                )
+                if (finnishedPlayers.length === players.length) {
+                    if (playerLobby.game.gameParams) {
+                        const finalRoute = await getRouteCoordinates([
+                            [
+                                playerLobby.game.gameParams.startMarkerPosition
+                                    .lng,
+                                playerLobby.game.gameParams.startMarkerPosition
+                                    .lat,
+                            ],
+                            [
+                                playerLobby.game.gameParams
+                                    .finnishMarkerPosition.lng,
+                                playerLobby.game.gameParams
+                                    .finnishMarkerPosition.lat,
+                            ],
+                        ])
 
-            const room = rooms.find(
-                (room) => room.lobbyNumber === playersRoom.lobbyNumber
-            )
+                        const evaluatedPlayers = evaluateGame(
+                            playerLobby.players,
+                            finalRoute.distance
+                        )
 
-            callback(room as RoomItem)
-            if (room?.players.every((player) => player.ready)) {
-                const gameParams = await getGameHandler(null)
-                socket
-                    .to(playersRoom.lobbyNumber)
-                    .emit('lobby-change', room as RoomItem)
-                socket
-                    .to(playersRoom.lobbyNumber)
-                    .emit('game-start', gameParams)
-                socket.emit('game-start', gameParams)
-            } else {
-                socket
-                    .to(playersRoom.lobbyNumber)
-                    .emit('lobby-change', room as RoomItem)
+                        lobbies = lobbies.map((lobby) => {
+                            if (lobby.lobbyNumber === playerLobby.lobbyNumber) {
+                                return {
+                                    ...lobby,
+                                    players: evaluatedPlayers,
+                                }
+                            }
+                            return lobby
+                        })
+
+                        const currentLobby = lobbies.find(
+                            (lobby) =>
+                                lobby.lobbyNumber === playerLobby.lobbyNumber
+                        )
+
+                        socket
+                            .to(playerLobby.lobbyNumber)
+                            .emit('game-finnished', {
+                                currentLobby,
+                                finalRoute,
+                            })
+                        socket.emit('game-finnished', {
+                            currentLobby,
+                            finalRoute,
+                        })
+                    }
+                }
             }
-        } else {
-            callback()
         }
-    })
-    socket.on('game-unready', async (lobbyNumber, callback) => {
-        await socket.leave(lobbyNumber)
-        console.log(lobbyNumber)
-        const roomPlayers = io.sockets.adapter.rooms.get(lobbyNumber)
-
-        rooms = removePlayerFromLobby(lobbyNumber, socket.id)
-
-        const socketRoom = rooms.find(
-            (room) => room.lobbyNumber === lobbyNumber
-        )
-        callback()
-        socket.to(lobbyNumber).emit('player-left', socketRoom)
     })
 })
 
 httpServer.listen(3001)
 
+const defaultGameOptions = {
+    timeLimit: 300,
+    levelsPerGame: 3,
+}
+
 const addPlayerToLobby = (
     lobbyNumber: string,
     playerName: string,
     socketId: string
-): RoomItem[] => {
-    const existingRoom = rooms.find((room) => room.lobbyNumber === lobbyNumber)
-    if (existingRoom) {
-        return rooms.map((room) => {
-            if (room.lobbyNumber === lobbyNumber) {
+): LobbyItem[] => {
+    const existingLobby = lobbies.find(
+        (lobby) => lobby.lobbyNumber === lobbyNumber
+    )
+    if (existingLobby) {
+        return lobbies.map((lobby) => {
+            if (lobby.lobbyNumber === lobbyNumber) {
                 return {
                     lobbyNumber,
+                    game: {
+                        gameParams: lobby.game.gameParams,
+                        gameOptions: lobby.game.gameOptions,
+                    },
                     players: [
-                        ...room.players,
-                        { playerName, socketId, ready: false, score: 0 },
+                        ...lobby.players,
+                        {
+                            playerName,
+                            socketId,
+                            ready: false,
+                            score: 0,
+                            color: availableColors[lobby.players.length],
+                            finished: false,
+                            routeCoordinates: [],
+                            distance: 0,
+                        },
                     ],
                 }
             }
-            return room
+            return lobby
         })
     }
     return [
-        ...rooms,
+        ...lobbies,
         {
             lobbyNumber,
-            players: [{ playerName, socketId, ready: false, score: 0 }],
+            game: {
+                gameParams: null,
+                gameOptions: defaultGameOptions,
+            },
+            players: [
+                {
+                    playerName,
+                    socketId,
+                    ready: false,
+                    score: 0,
+                    color: availableColors[0],
+                    finished: false,
+                    routeCoordinates: [],
+                    distance: 0,
+                },
+            ],
         },
     ]
 }
 
 const removePlayerFromLobby = (lobbyNumber: string, socketId: string) => {
-    return rooms.map((room) => {
+    return lobbies.map((room) => {
         if (room.lobbyNumber === lobbyNumber) {
             return {
                 ...room,
@@ -177,16 +332,47 @@ const removePlayerFromLobby = (lobbyNumber: string, socketId: string) => {
     })
 }
 
-const changePlayerState = (ready: boolean, socketId: string) => {
-    return rooms.map((room) => {
-        return {
-            ...room,
-            players: room.players.map((player) => {
-                if (player.socketId === socketId) {
-                    return { ...player, ready }
+const changePlayerState = (
+    playerStatus: boolean,
+    socketId: string,
+    playerLobby: LobbyItem
+): LobbyItem => {
+    return {
+        ...playerLobby,
+        players: playerLobby.players.map((player) => {
+            if (player.socketId === socketId) {
+                return { ...player, ready: playerStatus }
+            }
+            return player
+        }),
+    }
+}
+
+const generateDuelGame = async (lobby: LobbyItem) => {
+    const gameParams = JSON.parse(
+        (await getGameHandler(null)) ?? ''
+    ) as GameParams
+
+    lobby.game = {
+        gameParams,
+        gameOptions: lobby.game.gameOptions,
+    }
+
+    return lobby
+}
+
+const evaluateGame = (players: PlayerItem[], finalDistance: number) => {
+    return players
+        .map((player) => {
+            if (player.distance === finalDistance) {
+                return {
+                    ...player,
+                    score: player.score + Math.round(finalDistance),
+                    finished: false,
+                    ready: false,
                 }
-                return player
-            }),
-        }
-    })
+            }
+            return { ...player, finished: false, ready: false }
+        })
+        .sort((a, b) => b.score - a.score)
 }
