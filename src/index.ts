@@ -10,7 +10,7 @@ import { v4 } from 'uuid'
 import { getRouteCoordinates } from './services/mapbox/mapmatching/getRouteCoordinates'
 
 const corsOptions = {
-    origin: 'http://3.74.42.110/',
+    origin: 'http://3.74.42.110',
 }
 
 const app = express()
@@ -41,7 +41,7 @@ app.listen(port, () => {
 
 const httpServer = createServer(app)
 const io = new Server(httpServer, {
-    cors: { origin: ['http://3.74.42.110/'] },
+    cors: { origin: ['http://3.74.42.110'] },
 })
 
 let lobbies: LobbyItem[] = []
