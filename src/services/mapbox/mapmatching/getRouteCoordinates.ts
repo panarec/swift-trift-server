@@ -4,7 +4,6 @@ export const getRouteCoordinates = async (
     routePath: number[][]
 ): Promise<MatchObject> => {
     const reqCoordinates = routePath.join(';')
-    console.log({reqCoordinates})
     const radiuses = routePath.map(() => '1').join(';')
     let response
     try {
@@ -13,7 +12,6 @@ export const getRouteCoordinates = async (
         )
 
         const coords = (await response.json()) as MappingObject
-        console.log(coords)
         return coords.matchings[0]
     } catch (e) {
         throw new Error((e as Error).message)

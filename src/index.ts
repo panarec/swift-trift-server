@@ -8,13 +8,21 @@ import { Server } from 'socket.io'
 import { GameParams } from './handlers/types'
 import { v4 } from 'uuid'
 import { getRouteCoordinates } from './services/mapbox/mapmatching/getRouteCoordinates'
+import 'dotenv/config'
+import logger from 'pino'
+
+const log = logger({
+    transport: {
+        target: 'pino-pretty',
+    },
+})
 
 const corsOptions = {
-    origin: 'http://3.74.42.110',
+    origin: process.env.CLIENT_URL,
 }
 
 const app = express()
-const port = 3000
+const port = process.env.HTTP_PORT
 
 app.use(cors(corsOptions))
 app.use(express.json()) // for parsing application/json
@@ -41,7 +49,7 @@ app.listen(port, () => {
 
 const httpServer = createServer(app)
 const io = new Server(httpServer, {
-    cors: { origin: ['http://3.74.42.110'] },
+    cors: { origin: [process.env.CLIENT_URL as string] },
 })
 
 let lobbies: LobbyItem[] = []
@@ -74,16 +82,19 @@ const availableColors = ['FF9F1C', '3772FF', 'DF2935', '43E726', 'CD38FF']
 
 io.on('connection', (socket) => {
     console.log(socket.id)
-    socket.broadcast.emit('random')
     socket.on(
         'join-lobby',
         async (lobbyNumber: string, playerName: string, callback) => {
+            log.info(`Player ${playerName} joined lobby ${lobbyNumber}`)
             await socket.join(lobbyNumber)
-            const roomPlayers = io.sockets.adapter.rooms.get(lobbyNumber)
             lobbies = addPlayerToLobby(lobbyNumber, playerName, socket.id)
 
             const socketRoom = lobbies.find(
                 (lobby) => lobby.lobbyNumber === lobbyNumber
+            )
+            log.info('Player joined lobby')
+            log.info(
+                `Lobby ${lobbyNumber} has ${socketRoom?.players.length} players`
             )
             socket.to(lobbyNumber).emit('lobby-change', socketRoom)
             callback(socketRoom)
@@ -95,7 +106,7 @@ io.on('connection', (socket) => {
         })?.lobbyNumber
 
         if (!lobbyNumber) return
-        
+
         await socket.leave(lobbyNumber)
 
         lobbies = removePlayerFromLobby(lobbyNumber, socket.id)
@@ -252,7 +263,7 @@ io.on('connection', (socket) => {
     })
 })
 
-httpServer.listen(3001)
+httpServer.listen(process.env.SOCKET_PORT)
 
 const defaultGameOptions = {
     timeLimit: 300,
@@ -268,6 +279,7 @@ const addPlayerToLobby = (
         (lobby) => lobby.lobbyNumber === lobbyNumber
     )
     if (existingLobby) {
+        log.info(`${lobbyNumber} exists. Player ${playerName} joined.`)
         return lobbies.map((lobby) => {
             if (lobby.lobbyNumber === lobbyNumber) {
                 return {
@@ -294,6 +306,7 @@ const addPlayerToLobby = (
             return lobby
         })
     }
+    log.info(`${lobbyNumber} does not exist. Creating...`)
     return [
         ...lobbies,
         {

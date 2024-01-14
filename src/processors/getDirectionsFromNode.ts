@@ -14,7 +14,6 @@ export const getDirectionsFromNode = async (
     )
 
     let availableJunctions: NodeElement[] = []
-    console.log({ ways })
     for (const way of ways) {
         const closestWayJunctions = await getClosesJunctionsOfWay(
             way,
@@ -26,8 +25,6 @@ export const getDirectionsFromNode = async (
     availableJunctions = availableJunctions.filter(
         (junction) => junction.id !== currentJunctionNode.id
     )
-    console.log({ availableJunctions })
-
     return availableJunctions
 }
 
