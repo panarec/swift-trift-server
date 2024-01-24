@@ -9,7 +9,7 @@ import { GameParams } from './handlers/types'
 import { v4 } from 'uuid'
 import { getRouteCoordinates } from './services/mapbox/mapmatching/getRouteCoordinates'
 import 'dotenv/config'
-import logger from 'pino'
+import logger, { P } from 'pino'
 
 const log = logger({
     transport: {
@@ -76,6 +76,7 @@ type LobbyItem = {
 type GameOptions = {
     timeLimit: number
     levelsPerGame: number
+    difficulty: 'veryEasy' | 'easy' | 'normal' | 'hard' | 'extreme'
 }
 
 const availableColors = ['FF9F1C', '3772FF', 'DF2935', '43E726', 'CD38FF']
@@ -125,20 +126,38 @@ io.on('connection', (socket) => {
                     (player) => player.socketId === socket.id
                 )
             })
+            log.info(
+                `Player ${socket.id} changed lobby ${JSON.stringify(
+                    playerLobby?.lobbyNumber
+                )} options to ${JSON.stringify(options)}`
+            )
             if (playerLobby) {
                 lobbies = lobbies.map((lobby) => {
                     if (lobby.lobbyNumber === playerLobby.lobbyNumber) {
                         return {
                             ...lobby,
-                            options,
+                            game: {
+                                gameParams: lobby.game.gameParams,
+                                gameOptions: options,
+                            },
                         }
                     }
                     return lobby
                 })
-                socket.emit('lobby-change', playerLobby as LobbyItem)
+                const changedLobby = lobbies.find(
+                    (lobby) => lobby.lobbyNumber === playerLobby.lobbyNumber
+                )
+                log.info(
+                    `Lobby ${JSON.stringify(
+                        changedLobby?.lobbyNumber
+                    )} options changed to ${JSON.stringify(
+                        changedLobby?.game.gameOptions
+                    )}`
+                )
+                socket.emit('lobby-change', changedLobby as LobbyItem)
                 socket
                     .to(playerLobby.lobbyNumber)
-                    .emit('lobby-change', playerLobby as LobbyItem)
+                    .emit('lobby-change', changedLobby as LobbyItem)
             }
         }
     )
@@ -266,8 +285,9 @@ io.on('connection', (socket) => {
 httpServer.listen(process.env.SOCKET_PORT)
 
 const defaultGameOptions = {
-    timeLimit: 300,
-    levelsPerGame: 3,
+    timeLimit: 30,
+    levelsPerGame: 5,
+    difficulty: 'normal',
 }
 
 const addPlayerToLobby = (
