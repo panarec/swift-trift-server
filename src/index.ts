@@ -5,11 +5,15 @@ import { moveHandler } from './handlers/moveHandler'
 import { finnishGameHandler } from './handlers/finnishGameHandler'
 import { createServer } from 'http'
 import { Server } from 'socket.io'
-import { GameParams } from './handlers/types'
+import { GameOptions, GameParams, LobbyItem, PlayerItem } from './types/types'
 import { v4 } from 'uuid'
 import { getRouteCoordinates } from './services/mapbox/mapmatching/getRouteCoordinates'
 import 'dotenv/config'
 import logger, { P } from 'pino'
+import { getLobbyHandler } from './handlers/getLobbyHandler'
+import { lobbyRepository } from './cache/schemas/lobby'
+import { client } from './cache/redisClient'
+import e from 'express'
 
 const log = logger({
     transport: {
@@ -42,6 +46,10 @@ app.post('/finnishGame', async (req, res) => {
     const response = await finnishGameHandler(req)
     res.send(response)
 })
+app.get('/createLobby', async (req, res) => {
+    const lobby = await getLobbyHandler(req)
+    res.send(lobby)
+})
 
 app.listen(port, () => {
     console.log(`Listening on port ${port}...`)
@@ -52,151 +60,144 @@ const io = new Server(httpServer, {
     cors: { origin: [process.env.CLIENT_URL as string] },
 })
 
-let lobbies: LobbyItem[] = []
-
-type PlayerItem = {
-    playerName: string
-    socketId: string
-    ready: boolean
-    score: number
-    color: string
-    finished: boolean
-    routeCoordinates: number[][]
-    distance: number
-}
-
-type LobbyItem = {
-    lobbyNumber: string
-    players: PlayerItem[]
-    game: {
-        gameParams: GameParams | null
-        gameOptions: GameOptions
-    }
-}
-type GameOptions = {
-    timeLimit: number
-    levelsPerGame: number
-    difficulty: 'veryEasy' | 'easy' | 'normal' | 'hard' | 'extreme'
-}
-
 const availableColors = ['FF9F1C', '3772FF', 'DF2935', '43E726', 'CD38FF']
+const lobbyExpirationTime = 60 * 30
 
 io.on('connection', (socket) => {
-    console.log(socket.id)
+    socket.on('create-lobby', async (playerName: string, callback) => {
+        const lobbyNumber = v4().split('-')[0]
+        const lobby: LobbyItem = {
+            lobbyNumber,
+            players: [
+                {
+                    playerName,
+                    socketId: socket.id,
+                    ready: false,
+                    score: 0,
+                    color: availableColors[0],
+                    finished: false,
+                    routeCoordinates: [],
+                    distance: 0,
+                    totalTime: 0,
+                    lastLevelscore: 0,
+                    lastLevelTime: 0,
+                },
+            ],
+            game: {
+                gameParams: null,
+                gameOptions: defaultGameOptions,
+            },
+        }
+
+        await client.set(lobbyNumber, JSON.stringify(lobby), {
+            EX: lobbyExpirationTime,
+        })
+        await socket.join(lobbyNumber)
+        log.info(`Player ${playerName} created lobby ${lobbyNumber}`)
+        callback(lobby)
+    })
     socket.on(
         'join-lobby',
         async (lobbyNumber: string, playerName: string, callback) => {
-            log.info(`Player ${playerName} joined lobby ${lobbyNumber}`)
-            await socket.join(lobbyNumber)
-            lobbies = addPlayerToLobby(lobbyNumber, playerName, socket.id)
-
-            const socketRoom = lobbies.find(
-                (lobby) => lobby.lobbyNumber === lobbyNumber
-            )
-            log.info('Player joined lobby')
-            log.info(
-                `Lobby ${lobbyNumber} has ${socketRoom?.players.length} players`
-            )
-            socket.to(lobbyNumber).emit('lobby-change', socketRoom)
-            callback(socketRoom)
+            try {
+                await socket.join(lobbyNumber)
+                const lobby = await addPlayerToLobby(
+                    lobbyNumber,
+                    playerName,
+                    socket.id
+                )
+                log.info(`Player ${playerName} joined lobby ${lobbyNumber}`)
+                log.info(
+                    `Lobby ${lobbyNumber} has ${lobby?.players.length} players`
+                )
+                callback(lobby)
+                socket.to(lobbyNumber).emit('lobby-change', lobby)
+            } catch (e) {
+                log.error(e)
+                callback(null)
+            }
         }
     )
-    socket.on('leave-lobby', async (callback) => {
-        const lobbyNumber = lobbies.find((lobby) => {
-            return lobby.players.find((player) => player.socketId === socket.id)
-        })?.lobbyNumber
-
+    socket.on('leave-lobby', async (lobbyNumber, callback) => {
         if (!lobbyNumber) return
 
         await socket.leave(lobbyNumber)
 
-        lobbies = removePlayerFromLobby(lobbyNumber, socket.id)
-
-        const socketLobby = lobbies.find(
-            (lobby) => lobby.lobbyNumber === lobbyNumber
-        )
-        callback()
-        socket.to(lobbyNumber).emit('lobby-change', socketLobby)
+        try {
+            const lobby = await removePlayerFromLobby(lobbyNumber, socket.id)
+            log.info(`Player ${socket.id} left lobby ${lobbyNumber}`)
+            callback()
+            socket.to(lobbyNumber).emit('lobby-change', lobby)
+        } catch (e) {
+            log.error(e)
+            callback()
+        }
     })
     socket.on(
         'change-lobby-options',
-        async (options: GameOptions, callback) => {
-            const playerLobby = lobbies.find((lobby) => {
-                return lobby.players.find(
-                    (player) => player.socketId === socket.id
-                )
-            })
+        async (lobbyNumber: string, options: GameOptions) => {
+            let playerLobby: string | LobbyItem | null =
+                await client.get(lobbyNumber)
             log.info(
-                `Player ${socket.id} changed lobby ${JSON.stringify(
-                    playerLobby?.lobbyNumber
-                )} options to ${JSON.stringify(options)}`
+                `Player ${
+                    socket.id
+                } changed lobby ${lobbyNumber} options to ${JSON.stringify(
+                    options
+                )}`
             )
+
             if (playerLobby) {
-                lobbies = lobbies.map((lobby) => {
-                    if (lobby.lobbyNumber === playerLobby.lobbyNumber) {
-                        return {
-                            ...lobby,
-                            game: {
-                                gameParams: lobby.game.gameParams,
-                                gameOptions: options,
-                            },
-                        }
-                    }
-                    return lobby
+                playerLobby = JSON.parse(playerLobby) as LobbyItem
+                const newLobby = {
+                    ...playerLobby,
+                    game: {
+                        gameParams: playerLobby.game.gameParams,
+                        gameOptions: options,
+                    },
+                }
+                await client.set(lobbyNumber, JSON.stringify(newLobby), {
+                    EX: lobbyExpirationTime,
                 })
-                const changedLobby = lobbies.find(
-                    (lobby) => lobby.lobbyNumber === playerLobby.lobbyNumber
-                )
                 log.info(
                     `Lobby ${JSON.stringify(
-                        changedLobby?.lobbyNumber
-                    )} options changed to ${JSON.stringify(
-                        changedLobby?.game.gameOptions
-                    )}`
+                        lobbyNumber
+                    )} options changed to ${JSON.stringify(options)}`
                 )
-                socket.emit('lobby-change', changedLobby as LobbyItem)
-                socket
-                    .to(playerLobby.lobbyNumber)
-                    .emit('lobby-change', changedLobby as LobbyItem)
+                socket.emit('lobby-change', newLobby)
+                socket.to(lobbyNumber).emit('lobby-change', newLobby)
+            } else {
+                log.error(`Lobby ${lobbyNumber} does not exist`)
             }
         }
     )
     socket.on(
         'game-ready',
-        async (playerStatus: boolean, options: GameOptions, callback) => {
-            const playerLobby = lobbies.find((lobby) => {
-                return lobby.players.find(
-                    (player) => player.socketId === socket.id
-                )
-            })
+        async (playerStatus: boolean, lobbyNumber: string) => {
+            let playerLobby: string | null | LobbyItem =
+                await client.get(lobbyNumber)
 
             if (playerLobby) {
+                playerLobby = JSON.parse(playerLobby) as LobbyItem
                 const newLobby = changePlayerState(
                     playerStatus,
                     socket.id,
                     playerLobby
                 )
 
-                lobbies = lobbies.map((lobby) => {
-                    if (lobby.lobbyNumber === playerLobby.lobbyNumber) {
-                        return newLobby
-                    }
-                    return lobby
+                await client.set(lobbyNumber, JSON.stringify(newLobby), {
+                    EX: lobbyExpirationTime,
                 })
 
-                socket.emit('lobby-change', newLobby as LobbyItem)
-                socket
-                    .to(playerLobby.lobbyNumber)
-                    .emit('lobby-change', newLobby as LobbyItem)
+                socket.emit('lobby-change', newLobby)
+                socket.to(lobbyNumber).emit('lobby-change', newLobby)
+
                 if (newLobby?.players.every((player) => player.ready)) {
                     socket.to(playerLobby.lobbyNumber).emit('all-ready')
                     socket.emit('all-ready')
+
                     const lobbyWithGame = await generateDuelGame(playerLobby)
-                    lobbies = lobbies.map((lobby) => {
-                        if (lobby.lobbyNumber === playerLobby.lobbyNumber) {
-                            return lobbyWithGame
-                        }
-                        return lobby
+                    client.set(lobbyNumber, JSON.stringify(lobbyWithGame), {
+                        EX: lobbyExpirationTime,
                     })
 
                     socket
@@ -204,165 +205,158 @@ io.on('connection', (socket) => {
                         .emit('game-start', lobbyWithGame.game.gameParams)
                     socket.emit('game-start', lobbyWithGame.game.gameParams)
                 }
+            } else {
+                log.error(`Lobby ${lobbyNumber} does not exist`)
             }
         }
     )
 
-    socket.on('finnish-level', async (routeCoordinates) => {
-        const playerLobby = lobbies.find((lobby) => {
-            return lobby.players.find((player) => player.socketId === socket.id)
-        })
+    socket.on(
+        'finnish-level',
+        async (
+            lobbyNumber: string,
+            routeCoordinates: [number, number][],
+            time: number
+        ) => {
+            let playerLobby: string | LobbyItem | null =
+                await client.get(lobbyNumber)
 
-        if (playerLobby) {
-            const player = playerLobby.players.find(
-                (player) => player.socketId === socket.id
-            )
-            if (player) {
-                player.finished = true
-                const playerMatchObject =
-                    await getRouteCoordinates(routeCoordinates)
-                player.distance = playerMatchObject.distance
-                player.routeCoordinates = playerMatchObject.geometry.coordinates
-
-                const players = playerLobby.players
-                const finnishedPlayers = players.filter(
-                    (player) => player.finished
+            if (playerLobby) {
+                playerLobby = JSON.parse(playerLobby) as LobbyItem
+                const player = playerLobby.players.find(
+                    (player) => player.socketId === socket.id
                 )
-                if (finnishedPlayers.length === players.length) {
-                    if (playerLobby.game.gameParams) {
-                        const finalRoute = await getRouteCoordinates([
-                            [
-                                playerLobby.game.gameParams.startMarkerPosition
-                                    .lng,
-                                playerLobby.game.gameParams.startMarkerPosition
-                                    .lat,
-                            ],
-                            [
-                                playerLobby.game.gameParams
-                                    .finnishMarkerPosition.lng,
-                                playerLobby.game.gameParams
-                                    .finnishMarkerPosition.lat,
-                            ],
-                        ])
+                if (player) {
+                    player.finished = true
+                    let playerMatchObject
+                    if (routeCoordinates.length <= 1) {
+                        playerMatchObject = {
+                            distance: 0,
+                            geometry: {
+                                coordinates: [],
+                            },
+                        }
+                    } else {
+                        playerMatchObject =
+                            await getRouteCoordinates(routeCoordinates)
+                    }
+                    player.distance = playerMatchObject.distance
+                    player.routeCoordinates =
+                        playerMatchObject.geometry.coordinates
 
-                        const evaluatedPlayers = evaluateGame(
-                            playerLobby.players,
-                            finalRoute.distance
-                        )
+                    player.totalTime =
+                        player.totalTime +
+                        (playerLobby.game.gameOptions.timeLimit - time)
+                    player.lastLevelTime = time
+                    const players = playerLobby.players
+                    const finnishedPlayers = players.filter(
+                        (player) => player.finished
+                    )
+                    if (finnishedPlayers.length === players.length) {
+                        if (playerLobby.game.gameParams) {
+                            const finalRoute = await getRouteCoordinates([
+                                [
+                                    playerLobby.game.gameParams
+                                        .startMarkerPosition.lng,
+                                    playerLobby.game.gameParams
+                                        .startMarkerPosition.lat,
+                                ],
+                                [
+                                    playerLobby.game.gameParams
+                                        .finnishMarkerPosition.lng,
+                                    playerLobby.game.gameParams
+                                        .finnishMarkerPosition.lat,
+                                ],
+                            ])
 
-                        lobbies = lobbies.map((lobby) => {
-                            if (lobby.lobbyNumber === playerLobby.lobbyNumber) {
-                                return {
-                                    ...lobby,
-                                    players: evaluatedPlayers,
-                                }
+                            const evaluatedPlayers = evaluateGame(
+                                playerLobby.players,
+                                finalRoute.distance
+                            )
+                            const currentLobby = {
+                                ...playerLobby,
+                                players: evaluatedPlayers,
                             }
-                            return lobby
-                        })
 
-                        const currentLobby = lobbies.find(
-                            (lobby) =>
-                                lobby.lobbyNumber === playerLobby.lobbyNumber
-                        )
+                            client.set(
+                                lobbyNumber,
+                                JSON.stringify(currentLobby),
+                                { EX: lobbyExpirationTime }
+                            )
 
-                        socket
-                            .to(playerLobby.lobbyNumber)
-                            .emit('game-finnished', {
+                            socket.to(lobbyNumber).emit('game-finnished', {
                                 currentLobby,
                                 finalRoute,
                             })
-                        socket.emit('game-finnished', {
-                            currentLobby,
-                            finalRoute,
-                        })
+                            socket.emit('game-finnished', {
+                                currentLobby,
+                                finalRoute,
+                            })
+                        }
                     }
                 }
+            } else {
+                log.error(`Lobby ${lobbyNumber} does not exist`)
             }
         }
-    })
+    )
 })
 
 httpServer.listen(process.env.SOCKET_PORT)
 
-const defaultGameOptions = {
+const defaultGameOptions: GameOptions = {
     timeLimit: 30,
     levelsPerGame: 5,
     difficulty: 'normal',
 }
 
-const addPlayerToLobby = (
+const addPlayerToLobby = async (
     lobbyNumber: string,
     playerName: string,
     socketId: string
-): LobbyItem[] => {
-    const existingLobby = lobbies.find(
-        (lobby) => lobby.lobbyNumber === lobbyNumber
-    )
+): Promise<LobbyItem> => {
+    let existingLobby = await client.get(lobbyNumber)
     if (existingLobby) {
+        const parsedExistingLobby = JSON.parse(existingLobby) as LobbyItem
         log.info(`${lobbyNumber} exists. Player ${playerName} joined.`)
-        return lobbies.map((lobby) => {
-            if (lobby.lobbyNumber === lobbyNumber) {
-                return {
-                    lobbyNumber,
-                    game: {
-                        gameParams: lobby.game.gameParams,
-                        gameOptions: lobby.game.gameOptions,
-                    },
-                    players: [
-                        ...lobby.players,
-                        {
-                            playerName,
-                            socketId,
-                            ready: false,
-                            score: 0,
-                            color: availableColors[lobby.players.length],
-                            finished: false,
-                            routeCoordinates: [],
-                            distance: 0,
-                        },
-                    ],
-                }
-            }
-            return lobby
+        parsedExistingLobby.players.push({
+            playerName,
+            socketId,
+            ready: false,
+            score: 0,
+            color: availableColors[parsedExistingLobby.players.length],
+            finished: false,
+            routeCoordinates: [],
+            distance: 0,
+            totalTime: 0,
+            lastLevelscore: 0,
+            lastLevelTime: 0,
         })
+        await client.set(lobbyNumber, JSON.stringify(parsedExistingLobby), {
+            EX: lobbyExpirationTime,
+        })
+        return parsedExistingLobby
     }
-    log.info(`${lobbyNumber} does not exist. Creating...`)
-    return [
-        ...lobbies,
-        {
-            lobbyNumber,
-            game: {
-                gameParams: null,
-                gameOptions: defaultGameOptions,
-            },
-            players: [
-                {
-                    playerName,
-                    socketId,
-                    ready: false,
-                    score: 0,
-                    color: availableColors[0],
-                    finished: false,
-                    routeCoordinates: [],
-                    distance: 0,
-                },
-            ],
-        },
-    ]
+    throw new Error(`Lobby ${lobbyNumber} does not exist`)
 }
 
-const removePlayerFromLobby = (lobbyNumber: string, socketId: string) => {
-    return lobbies.map((room) => {
-        if (room.lobbyNumber === lobbyNumber) {
-            return {
-                ...room,
-                players: room.players.filter(
-                    (player) => player.socketId !== socketId
-                ),
-            }
+const removePlayerFromLobby = async (lobbyNumber: string, socketId: string) => {
+    let lobby: string | LobbyItem | null = await client.get(lobbyNumber)
+    if (lobby) {
+        lobby = JSON.parse(lobby) as LobbyItem
+        const newLobby = {
+            ...lobby,
+            players: lobby.players.filter(
+                (player) => player.socketId !== socketId
+            ),
         }
-        return room
-    })
+        client.set(lobbyNumber, JSON.stringify(newLobby), {
+            EX: lobbyExpirationTime,
+        })
+        return newLobby
+    } else {
+        throw new Error('Lobby does not exist')
+    }
 }
 
 const changePlayerState = (
@@ -386,9 +380,19 @@ const generateDuelGame = async (lobby: LobbyItem) => {
         (await getGameHandler(null)) ?? ''
     ) as GameParams
 
-    lobby.game = {
-        gameParams,
-        gameOptions: lobby.game.gameOptions,
+    if (!lobby.game.gameParams) {
+        lobby.game = {
+            gameParams: { ...gameParams, currentLevel: 1 },
+            gameOptions: lobby.game.gameOptions,
+        }
+    } else {
+        lobby.game = {
+            gameParams: {
+                ...gameParams,
+                currentLevel: lobby.game.gameParams.currentLevel + 1,
+            },
+            gameOptions: lobby.game.gameOptions,
+        }
     }
 
     return lobby
@@ -397,15 +401,22 @@ const generateDuelGame = async (lobby: LobbyItem) => {
 const evaluateGame = (players: PlayerItem[], finalDistance: number) => {
     return players
         .map((player) => {
-            if (player.distance === finalDistance) {
+            if (Math.round(player.distance) === Math.round(finalDistance)) {
                 return {
                     ...player,
                     score: player.score + Math.round(finalDistance),
                     finished: false,
                     ready: false,
+                    lastLevelscore: Math.round(finalDistance),
                 }
             }
-            return { ...player, finished: false, ready: false }
+            return {
+                ...player,
+                finished: false,
+                ready: false,
+                lastLevelscore: 0,
+                lastLevelTime: 0,
+            }
         })
         .sort((a, b) => b.score - a.score)
 }
