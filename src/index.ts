@@ -64,6 +64,8 @@ const availableColors = ['FF9F1C', '3772FF', 'DF2935', '43E726', 'CD38FF']
 const lobbyExpirationTime = 60 * 30
 
 io.on('connection', (socket) => {
+    log.info(`Player ${socket.id} connected`)
+    log.info(`Number of sockets connected: ${io.engine.clientsCount}`)
     socket.on('create-lobby', async (playerName: string, callback) => {
         const lobbyNumber = v4().split('-')[0]
         const lobby: LobbyItem = {
@@ -100,6 +102,15 @@ io.on('connection', (socket) => {
         'join-lobby',
         async (lobbyNumber: string, playerName: string, callback) => {
             try {
+                let existingLobby = await client.get(lobbyNumber)
+                if (!existingLobby) {
+                    throw new Error(`Lobby ${lobbyNumber} does not exist`)
+                }
+                if (JSON.parse(existingLobby).gameStarted) {
+                    throw new Error(
+                        `Game in lobby ${lobbyNumber} has already started`
+                    )
+                }
                 await socket.join(lobbyNumber)
                 const lobby = await addPlayerToLobby(
                     lobbyNumber,
@@ -125,12 +136,19 @@ io.on('connection', (socket) => {
 
         try {
             const lobby = await removePlayerFromLobby(lobbyNumber, socket.id)
+            await client.set(lobbyNumber, JSON.stringify(lobby), {
+                EX: lobbyExpirationTime,
+            })
             log.info(`Player ${socket.id} left lobby ${lobbyNumber}`)
+            if (lobby) {
+                socket.to(lobbyNumber).emit('lobby-change', lobby)
+            }
             callback()
-            socket.to(lobbyNumber).emit('lobby-change', lobby)
+            socket.disconnect()
+            log.info(`Player ${socket.id} disconnected`)
+            log.info(`Number of sockets connected: ${io.engine.clientsCount}`)
         } catch (e) {
             log.error(e)
-            callback()
         }
     })
     socket.on(
@@ -138,6 +156,7 @@ io.on('connection', (socket) => {
         async (lobbyNumber: string, options: GameOptions) => {
             let playerLobby: string | LobbyItem | null =
                 await client.get(lobbyNumber)
+            log.info(io.sockets.adapter.rooms)
             log.info(
                 `Player ${
                     socket.id
@@ -220,7 +239,9 @@ io.on('connection', (socket) => {
         ) => {
             let playerLobby: string | LobbyItem | null =
                 await client.get(lobbyNumber)
-
+            log.info(
+                `Player ${socket.id} finnished level in lobby ${lobbyNumber}`
+            )
             if (playerLobby) {
                 playerLobby = JSON.parse(playerLobby) as LobbyItem
                 const player = playerLobby.players.find(
@@ -252,6 +273,10 @@ io.on('connection', (socket) => {
                     const finnishedPlayers = players.filter(
                         (player) => player.finished
                     )
+                    client.set(lobbyNumber, JSON.stringify(playerLobby), {
+                        EX: lobbyExpirationTime,
+                    })
+
                     if (finnishedPlayers.length === players.length) {
                         if (playerLobby.game.gameParams) {
                             const finalRoute = await getRouteCoordinates([
@@ -276,6 +301,7 @@ io.on('connection', (socket) => {
                             const currentLobby = {
                                 ...playerLobby,
                                 players: evaluatedPlayers,
+                                gameStarted: false,
                             }
 
                             client.set(
@@ -301,6 +327,10 @@ io.on('connection', (socket) => {
         }
     )
 })
+io.on('disconnect', (socket) => {
+    log.info(`Player ${socket.id} disconnected`)
+    log.info(`Number of sockets connected: ${io.engine.clientsCount}`)
+})
 
 httpServer.listen(process.env.SOCKET_PORT)
 
@@ -308,6 +338,7 @@ const defaultGameOptions: GameOptions = {
     timeLimit: 30,
     levelsPerGame: 5,
     difficulty: 'normal',
+    gameStarted: false,
 }
 
 const addPlayerToLobby = async (
@@ -350,9 +381,38 @@ const removePlayerFromLobby = async (lobbyNumber: string, socketId: string) => {
                 (player) => player.socketId !== socketId
             ),
         }
-        client.set(lobbyNumber, JSON.stringify(newLobby), {
-            EX: lobbyExpirationTime,
-        })
+        log.info(newLobby)
+        if (newLobby.players.length === 0) {
+            client.del(lobbyNumber)
+            log.info(`Lobby ${lobbyNumber} deleted`)
+        }
+        if (
+            newLobby.players.length === 1 &&
+            newLobby.game.gameOptions.gameStarted
+        ) {
+            const initialLobby: LobbyItem = {
+                ...newLobby,
+                players: newLobby.players.map((player) => {
+                    return {
+                        ...player,
+                        ready: false,
+                        score: 0,
+                        finished: false,
+                        routeCoordinates: [],
+                        distance: 0,
+                        totalTime: 0,
+                        lastLevelscore: 0,
+                        lastLevelTime: 0,
+                    }
+                }),
+                game: {
+                    ...newLobby.game,
+                    gameParams: null,
+                },
+            }
+            return initialLobby
+        }
+
         return newLobby
     } else {
         throw new Error('Lobby does not exist')
@@ -383,7 +443,7 @@ const generateDuelGame = async (lobby: LobbyItem) => {
     if (!lobby.game.gameParams) {
         lobby.game = {
             gameParams: { ...gameParams, currentLevel: 1 },
-            gameOptions: lobby.game.gameOptions,
+            gameOptions: { ...lobby.game.gameOptions, gameStarted: true },
         }
     } else {
         lobby.game = {
