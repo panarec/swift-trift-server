@@ -26,7 +26,7 @@ const corsOptions = {
 }
 
 const app = express()
-const port = process.env.HTTP_PORT
+const port = process.env.PORT
 
 app.use(cors(corsOptions))
 app.use(express.json()) // for parsing application/json
