@@ -1,6 +1,7 @@
 import { LngLat } from 'mapbox-gl'
 import { NodeElement, OverpassResponse } from './types'
 import { parseRequestBody, sendOverpassApiRequest } from '../../utils/overpass'
+import { log } from '../..'
 
 export async function getRoadsAroundPoints(coordinates: LngLat[]) {
     const points: number[][] = coordinates.map((coor) => [coor.lat, coor.lng])

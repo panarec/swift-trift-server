@@ -6,16 +6,18 @@ import { getStartMarkerNode } from '../processors/getStartMarkerNode'
 import { getFinnishMarkerNode } from '../processors/getFinnishMarkerNode'
 import { Request } from 'express'
 import { getDirectionsFromNode } from '../processors/getDirectionsFromNode'
+import { log } from '..'
 
-export const getGameHandler = async (request: Request | null) => {
+export const getGameHandler = async (
+    gameMode: 'solo' | 'duel',
+    difficulty: number
+) => {
+    log.info(difficulty)
     let startMarkerPosition: LngLat
     let startMarkerNode: NodeElement | null
 
     let finnishMarkerPosition: LngLat
     let finnishMarkerNode: NodeElement
-    const reqBody = request?.body
-
-    let currentLevel = reqBody?.currentLevel || 1
 
     const randomCityId = await getRandomCity()
     const randomCityMetadata = await getCityById(randomCityId)
@@ -27,6 +29,7 @@ export const getGameHandler = async (request: Request | null) => {
 
     startMarkerNode = await getStartMarkerNode(cityNode, bounds)
 
+
     if (startMarkerNode) {
         startMarkerPosition = new LngLat(
             startMarkerNode.lon,
@@ -35,7 +38,7 @@ export const getGameHandler = async (request: Request | null) => {
         finnishMarkerNode = await getFinnishMarkerNode(
             startMarkerPosition,
             maxRadius,
-            currentLevel
+            difficulty
         )
         finnishMarkerPosition = new LngLat(
             finnishMarkerNode.lon,

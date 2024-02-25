@@ -15,7 +15,7 @@ import { lobbyRepository } from './cache/schemas/lobby'
 import { client } from './cache/redisClient'
 import e from 'express'
 
-const log = logger({
+export const log = logger({
     transport: {
         target: 'pino-pretty',
     },
@@ -33,7 +33,9 @@ app.use(express.json()) // for parsing application/json
 app.use(express.urlencoded({ extended: true })) // for parsing application/x-www-form-urlencoded
 
 app.post('/getGame', async (req, res) => {
-    const response = await getGameHandler(req)
+    const reqBody = req?.body
+    const { currentLevel } = reqBody
+    const response = await getGameHandler('solo', currentLevel)
     res.send(response)
 })
 
@@ -60,7 +62,7 @@ const io = new Server(httpServer, {
     cors: { origin: [process.env.CLIENT_URL as string] },
 })
 
-const availableColors = ['FF9F1C', '3772FF', 'DF2935', '43E726', 'CD38FF']
+const availableColors = ['FF9F1C', '3772FF', 'DF2935', '00BF63', 'CD38FF']
 const lobbyExpirationTime = 60 * 30
 
 io.on('connection', (socket) => {
@@ -102,14 +104,20 @@ io.on('connection', (socket) => {
         'join-lobby',
         async (lobbyNumber: string, playerName: string, callback) => {
             try {
+                log.info(`Player ${playerName} joining lobby ${lobbyNumber}`)
                 let existingLobby = await client.get(lobbyNumber)
                 if (!existingLobby) {
-                    throw new Error(`Lobby ${lobbyNumber} does not exist`)
+                    log.error(`Lobby ${lobbyNumber} does not exist`)
+                    callback(null)
+                    return
                 }
-                if (JSON.parse(existingLobby).gameStarted) {
-                    throw new Error(
+                const parsedLobby = JSON.parse(existingLobby) as LobbyItem
+                if (parsedLobby.game.gameOptions.gameStarted) {
+                    callback(null)
+                    log.error(
                         `Game in lobby ${lobbyNumber} has already started`
                     )
+                    return
                 }
                 await socket.join(lobbyNumber)
                 const lobby = await addPlayerToLobby(
@@ -250,6 +258,7 @@ io.on('connection', (socket) => {
                 if (player) {
                     player.finished = true
                     let playerMatchObject
+                    log.info(routeCoordinates)
                     if (routeCoordinates.length <= 1) {
                         playerMatchObject = {
                             distance: 0,
@@ -309,7 +318,11 @@ io.on('connection', (socket) => {
                                 JSON.stringify(currentLobby),
                                 { EX: lobbyExpirationTime }
                             )
-
+                            log.info(
+                                `Game in lobby ${lobbyNumber} finnished. Players: ${JSON.stringify(
+                                    evaluatedPlayers
+                                )}`
+                            )
                             socket.to(lobbyNumber).emit('game-finnished', {
                                 currentLobby,
                                 finalRoute,
@@ -337,7 +350,7 @@ httpServer.listen(process.env.SOCKET_PORT)
 const defaultGameOptions: GameOptions = {
     timeLimit: 30,
     levelsPerGame: 5,
-    difficulty: 'normal',
+    difficulty: 3,
     gameStarted: false,
 }
 
@@ -437,7 +450,7 @@ const changePlayerState = (
 
 const generateDuelGame = async (lobby: LobbyItem) => {
     const gameParams = JSON.parse(
-        (await getGameHandler(null)) ?? ''
+        (await getGameHandler('duel', lobby.game.gameOptions.difficulty)) ?? ''
     ) as GameParams
 
     if (!lobby.game.gameParams) {

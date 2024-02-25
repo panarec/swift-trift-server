@@ -2,14 +2,17 @@ import { LngLat } from 'mapbox-gl'
 import { NodeElement, OverpassResponse } from '../services/overpass/types'
 import { getRoadsAroundPoints } from '../services/overpass/getRoadsAroundPoints'
 import _ from 'lodash'
+import { log } from '..'
+import e from 'express'
 
 export const getFinnishMarkerNode = async (
     startMarkerPosition: LngLat,
     maxRadius: number,
-    currentLevel: number = 1
+    difficulty: number = 1
 ): Promise<NodeElement> => {
     let loading: boolean = true
-    let minRadius = 0.002 + (currentLevel - 1) / 10000
+    let minRadius = difficulty * 15 / 5000
+    log.info(minRadius)
     const minimumBounds = startMarkerPosition.toBounds(minRadius)
     let roads: OverpassResponse<NodeElement>
     let finnishNode: NodeElement = {
@@ -31,7 +34,6 @@ export const getFinnishMarkerNode = async (
         }
         roads = await getRoadsAroundPoints(points)
         if (roads.elements.length > 0) {
-            loading = false
             const foundNode: NodeElement =
                 roads.elements[_.random(0, roads.elements.length - 1)]
             if (
@@ -39,6 +41,7 @@ export const getFinnishMarkerNode = async (
                 foundNode.lon !== startMarkerPosition.lng
             ) {
                 finnishNode = foundNode
+                loading = false
             }
         } else {
             minRadius += 0.0001
