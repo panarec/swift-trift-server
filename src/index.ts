@@ -63,23 +63,23 @@ app.use(cors(corsOptions))
 app.use(express.json()) // for parsing application/json
 app.use(express.urlencoded({ extended: true })) // for parsing application/x-www-form-urlencoded
 
-app.post('/getGame', async (req, res) => {
+app.post('/api/getGame', async (req, res) => {
     const reqBody = req?.body
     const { currentLevel } = reqBody
     const response = await getGameHandler('solo', currentLevel)
     res.send(response)
 })
 
-app.post('/move', async (req, res) => {
+app.post('/api/move', async (req, res) => {
     const response = await moveHandler(req)
     res.send(response)
 })
 
-app.post('/finnishGame', async (req, res) => {
+app.post('/api/finnishGame', async (req, res) => {
     const response = await finnishGameHandler(req)
     res.send(response)
 })
-app.get('/createLobby', async (req, res) => {
+app.get('/api/createLobby', async (req, res) => {
     const lobby = await getLobbyHandler(req)
     res.send(lobby)
 })
