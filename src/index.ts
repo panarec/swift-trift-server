@@ -360,6 +360,32 @@ io.on('connection', (socket) => {
                                 currentLobby,
                                 finalRoute,
                             })
+                            log.info(playerLobby.game.gameOptions.levelsPerGame)
+                            log.info(playerLobby.game.gameParams.currentLevel)
+                            if (
+                                playerLobby.game.gameOptions.levelsPerGame ==
+                                playerLobby.game.gameParams.currentLevel
+                            ) {
+                                log.info(
+                                    `Game in lobby ${lobbyNumber} has ended`
+                                )
+                                const resetedLobby = {
+                                    ...currentLobby,
+                                    game: {
+                                        gameParams: null,
+                                        gameOptions: {
+                                            ...currentLobby.game.gameOptions,
+                                            gameStarted: false,
+                                        },
+                                    },
+                                }
+                                client.set(
+                                    lobbyNumber,
+                                    JSON.stringify(resetedLobby),
+                                    { EX: lobbyExpirationTime }
+                                )
+                                log.info(`Lobby ${lobbyNumber} has been reset`)
+                            }
                         }
                     }
                 }
