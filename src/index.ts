@@ -3,7 +3,8 @@ import { getGameHandler } from './handlers/getGameHandler'
 import cors from 'cors'
 import { moveHandler } from './handlers/moveHandler'
 import { finnishGameHandler } from './handlers/finnishGameHandler'
-import { createServer } from 'http'
+import http from 'http'
+import https from 'https'
 import { Server } from 'socket.io'
 import { GameOptions, GameParams, LobbyItem, PlayerItem } from './types/types'
 import { v4 } from 'uuid'
@@ -13,7 +14,7 @@ import logger, { P } from 'pino'
 import { getLobbyHandler } from './handlers/getLobbyHandler'
 import { lobbyRepository } from './cache/schemas/lobby'
 import { client } from './cache/redisClient'
-import e from 'express'
+import fs from 'fs'
 
 export const log = logger({
     transport: {
@@ -21,12 +22,42 @@ export const log = logger({
     },
 })
 
+const app = express()
+const env = process.env.NODE_ENV
 const corsOptions = {
     origin: process.env.CLIENT_URL,
 }
-
-const app = express()
 const port = process.env.PORT
+
+if (env === 'production') {
+    // Certificate
+    const privateKey = fs.readFileSync(
+        '/etc/letsencrypt/live/swift-trift.com/privkey.pem',
+        'utf8'
+    )
+    const certificate = fs.readFileSync(
+        '/etc/letsencrypt/live/swift-trift.com/cert.pem',
+        'utf8'
+    )
+    const ca = fs.readFileSync(
+        '/etc/letsencrypt/live/swift-trift.com/chain.pem',
+        'utf8'
+    )
+
+    const credentials = {
+        key: privateKey,
+        cert: certificate,
+        ca: ca,
+    }
+    const httpsServer = https.createServer(credentials, app)
+    httpsServer.listen(port, () => {
+        console.log(`HTTPS Listening on port ${port}...`)
+    })
+} else {
+    app.listen(port, () => {
+        console.log(`Listening on port ${port}...`)
+    })
+}
 
 app.use(cors(corsOptions))
 app.use(express.json()) // for parsing application/json
@@ -53,11 +84,8 @@ app.get('/createLobby', async (req, res) => {
     res.send(lobby)
 })
 
-app.listen(port, () => {
-    console.log(`Listening on port ${port}...`)
-})
+const httpServer = http.createServer(app)
 
-const httpServer = createServer(app)
 const io = new Server(httpServer, {
     cors: { origin: [process.env.CLIENT_URL as string] },
 })
@@ -69,6 +97,7 @@ io.on('connection', (socket) => {
     log.info(`Player ${socket.id} connected`)
     log.info(`Number of sockets connected: ${io.engine.clientsCount}`)
     socket.on('create-lobby', async (playerName: string, callback) => {
+        log.info(`Player ${playerName} creating lobby`)
         const lobbyNumber = v4().split('-')[0]
         const lobby: LobbyItem = {
             lobbyNumber,
