@@ -19,6 +19,11 @@ import fs from 'fs'
 export const log = logger({
     transport: {
         target: 'pino-pretty',
+        options: {
+            colorize: true,
+            translateTime: 'SYS:standard',
+            ignore: 'pid,hostname',
+        },
     },
 })
 
