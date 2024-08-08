@@ -1,15 +1,11 @@
-# server
+## Description
 
-To install dependencies:
+Server repo for small web game [Swift-Trift](https://swift-trift.com/)
 
-```bash
-bun install
-```
+## Features
 
-To run:
-
-```bash
-bun run index.ts
-```
-
-This project was created using `bun init` in bun v1.0.6. [Bun](https://bun.sh) is a fast all-in-one JavaScript runtime.
+- Bun
+- ExpressJS
+- Typescript
+- Redis
+- Socket.io
