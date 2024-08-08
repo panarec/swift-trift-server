@@ -1,6 +1,6 @@
 ## Description
 
-Server repo for small web game [Swift-Trift](https://swift-trift.com/)
+Server for small web game [Swift-Trift](https://swift-trift.com/)
 
 ## Features
 
